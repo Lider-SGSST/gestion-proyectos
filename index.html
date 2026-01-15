@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Gestión de Proyectos</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const App = () => {
+            const [boards, setBoards] = useState([]);
+            const [currentView, setCurrentView] = useState('dashboard');
+            const [selectedBoard, setSelectedBoard] = useState(null);
+            const [showNewBoardModal, setShowNewBoardModal] = useState(false);
+            const [showTaskModal, setShowTaskModal] = useState(false);
+            const [selectedTask, setSelectedTask] = useState(null);
+
+            useEffect(() => {
+                const data = localStorage.getItem('boards');
+                if (data) setBoards(JSON.parse(data));
+            }, []);
+
+            const saveData = (data) => {
+                localStorage.setItem('boards', JSON.stringify(data));
+                setBoards(data);
+            };
+
+            const createBoard = (name) => {
+                const newBoard = {
+                    id: Date.now(),
+                    name,
+                    lists: [
+                        { id: 1, name: 'Pendiente', tasks: [] },
+                        { id: 2, name: 'En Proceso', tasks: [] },
+                        { id: 3, name: 'Finalizado', tasks: [] }
+                    ]
+                };
+                saveData([...boards, newBoard]);
+                setShowNewBoardModal(false);
+            };
+
+            const createTask = (boardId, listId, title) => {
+                const updated = boards.map(b => {
+                    if (b.id === boardId) {
+                        return {
+                            ...b,
+                            lists: b.lists.map(l => {
+                                if (l.id === listId) {
+                                    return {
+                                        ...l,
+                                        tasks: [...l.tasks, { id: Date.now(), title, subtasks: [] }]
+                                    };
+                                }
+                                return l;
+                            })
+                        };
+                    }
+                    return b;
+                });
+                saveData(updated);
+                setSelectedBoard(updated.find(b => b.id === boardId));
+            };
+
+            const updateTask = (boardId, listId, taskId, updates) => {
+                const updated = boards.map(b => {
+                    if (b.id === boardId) {
+                        return {
+                            ...b,
+                            lists: b.lists.map(l => {
+                                if (l.id === listId) {
+                                    return {
+                                        ...l,
+                                        tasks: l.tasks.map(t => t.id === taskId ? { ...t, ...updates } : t)
+                                    };
+                                }
+                                return l;
+                            })
+                        };
+                    }
+                    return b;
+                });
+                saveData(updated);
+                setSelectedBoard(updated.find(b => b.id === boardId));
+            };
+
+            const moveTask = (taskId, fromList, toList, boardId) => {
+                const updated = boards.map(b => {
+                    if (b.id === boardId) {
+                        let task = null;
+                        const lists = b.lists.map(l => {
+                            if (l.id === fromList) {
+                                task = l.tasks.find(t => t.id === taskId);
+                                return { ...l, tasks: l.tasks.filter(t => t.id !== taskId) };
+                            }
+                            return l;
+                        }).map(l => {
+                            if (l.id === toList && task) {
+                                return { ...l, tasks: [...l.tasks, task] };
+                            }
+                            return l;
+                        });
+                        return { ...b, lists };
+                    }
+                    return b;
+                });
+                saveData(updated);
+                setSelectedBoard(updated.find(b => b.id === boardId));
+            };
+
+            const getStats = (board) => {
+                const p = board.lists[0].tasks.length;
+                const i = board.lists[1].tasks.length;
+                const c = board.lists[2].tasks.length;
+                const total = p + i + c;
+                return { p, i, c, total, pct: total ? Math.round((c / total) * 100) : 0 };
+            };
+
+            const getSubtaskPct = (task) => {
+                if (!task.subtasks || !task.subtasks.length) return 100;
+                const done = task.subtasks.filter(s => s.done).length;
+                return Math.round((done / task.subtasks.length) * 100);
+            };
+
+            const exportExcel = (start, end) => {
+                const tasks = boards.flatMap(b => b.lists.flatMap(l => l.tasks.map(t => ({
+                    Tablero: b.name,
+                    Estado: l.name,
+                    Tarea: t.title,
+                    Fecha: t.date || '',
+                    Progreso: getSubtaskPct(t) + '%'
+                })))).filter(t => t.Fecha >= start && t.Fecha <= end);
+                const ws = XLSX.utils.json_to_sheet(tasks);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "Tareas");
+                XLSX.writeFile(wb, `informe_${start}_${end}.xlsx`);
+            };
+
+            const exportPDF = (start, end) => {
+                const { jsPDF } = window.jspdf;
+                const doc = new jsPDF();
+                const tasks = boards.flatMap(b => b.lists.flatMap(l => l.tasks.filter(t => t.date >= start && t.date <= end).map(t => ({
+                    board: b.name,
+                    list: l.name,
+                    title: t.title,
+                    date: t.date,
+                    pct: getSubtaskPct(t)
+                }))));
+                doc.text('INFORME DE TAREAS', 20, 20);
+                doc.text(`Período: ${start} - ${end}`, 20, 30);
+                let y = 40;
+                tasks.forEach((t, i) => {
+                    if (y > 270) { doc.addPage(); y = 20; }
+                    doc.setFontSize(10);
+                    doc.text(`${i+1}. ${t.title}`, 20, y);
+                    doc.setFontSize(8);
+                    doc.text(`   ${t.board} | ${t.list} | ${t.date} | ${t.pct}%`, 20, y + 5);
+                    y += 15;
+                });
+                doc.save(`informe_${start}_${end}.pdf`);
+            };
+
+            const genReport = () => {
+                const start = prompt('Fecha inicio (YYYY-MM-DD):');
+                const end = prompt('Fecha fin (YYYY-MM-DD):');
+                if (!start || !end) return;
+                const fmt = prompt('1=Excel, 2=PDF:');
+                if (fmt === '1') exportExcel(start, end);
+                else if (fmt === '2') exportPDF(start, end);
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-50">
+                    <nav className="bg-white shadow p-4 flex justify-between">
+                        <h1 className="text-2xl font-bold" style={{color:'#BAFF39'}}>Gestión de Proyectos</h1>
+                        <div className="flex gap-3">
+                            <button onClick={() => setCurrentView('dashboard')} className="px-4 py-2 rounded bg-gray-700 text-white">Dashboard</button>
+                            <button onClick={genReport} className="px-4 py-2 rounded bg-gray-600 text-white">Informe</button>
+                        </div>
+                    </nav>
+
+                    {currentView === 'dashboard' && (
+                        <div className="p-6">
+                            <div className="flex justify-between mb-6">
+                                <h2 className="text-3xl font-bold">Dashboard</h2>
+                                <button onClick={() => setShowNewBoardModal(true)} className="px-4 py-2 rounded font-semibold" style={{backgroundColor:'#BAFF39'}}>+ Nuevo Tablero</button>
+                            </div>
+                            <div className="grid md:grid-cols-3 gap-4">
+                                {boards.map(b => {
+                                    const stats = getStats(b);
+                                    return (
+                                        <div key={b.id} onClick={() => { setSelectedBoard(b); setCurrentView('board'); }} className="bg-white p-5 rounded shadow cursor-pointer border-2" style={{borderColor:'#BAFF39'}}>
+                                            <h3 className="text-xl font-bold mb-3">{b.name}</h3>
+                                            <div className="grid grid-cols-3 gap-2 mb-3 text-center text-sm">
+                                                <div className="bg-red-100 p-2 rounded"><div>Pendiente</div><div className="font-bold text-red-600">{stats.p}</div></div>
+                                                <div className="bg-yellow-100 p-2 rounded"><div>En Proceso</div><div className="font-bold text-yellow-600">{stats.i}</div></div>
+                                                <div className="bg-green-100 p-2 rounded"><div>Finalizado</div><div className="font-bold text-green-600">{stats.c}</div></div>
+                                            </div>
+                                            <div className="flex justify-between text-sm mb-1">
+                                                <span>Total: {stats.total}</span>
+                                                <span className="font-bold" style={{color:'#BAFF39'}}>{stats.pct}%</span>
+                                            </div>
+                                            <div className="w-full bg-gray-200 rounded h-2">
+                                                <div className="h-2 rounded" style={{width:`${stats.pct}%`,backgroundColor:'#BAFF39'}}/>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {currentView === 'board' && selectedBoard && (
+                        <div className="p-6">
+                            <button onClick={() => setCurrentView('dashboard')} className="text-blue-600 mb-4">← Volver</button>
+                            <h2 className="text-3xl font-bold mb-6">{selectedBoard.name}</h2>
+                            <div className="grid md:grid-cols-3 gap-4">
+                                {selectedBoard.lists.map(list => (
+                                    <div key={list.id} className="bg-gray-100 p-4 rounded" onDragOver={e => e.preventDefault()} onDrop={e => {
+                                        e.preventDefault();
+                                        const data = e.dataTransfer.getData('task');
+                                        if (data) {
+                                            const {taskId, fromList} = JSON.parse(data);
+                                            moveTask(taskId, fromList, list.id, selectedBoard.id);
+                                        }
+                                    }}>
+                                        <h3 className="font-bold text-lg mb-4">{list.name}</h3>
+                                        <div className="space-y-3">
+                                            {list.tasks.map(task => (
+                                                <div key={task.id} draggable onDragStart={e => e.dataTransfer.setData('task', JSON.stringify({taskId: task.id, fromList: list.id}))} onClick={() => { setSelectedTask({...task, listId: list.id}); setShowTaskModal(true); }} className={`p-3 rounded cursor-pointer shadow ${list.id===1?'bg-red-400':list.id===2?'bg-yellow-400':'bg-green-400'}`}>
+                                                    <div className="font-semibold">{task.title}</div>
+                                                    {task.date && <div className="text-xs mt-1">📅 {task.date}</div>}
+                                                    {task.subtasks && task.subtasks.length > 0 && (
+                                                        <div className="mt-2">
+                                                            <div className="text-xs">Subtareas: {task.subtasks.filter(s=>s.done).length}/{task.subtasks.length}</div>
+                                                            <div className="w-full bg-gray-300 rounded h-1 mt-1">
+                                                                <div className="h-1 rounded bg-blue-600" style={{width:`${getSubtaskPct(task)}%`}}/>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button onClick={() => {
+                                            const title = prompt('Título:');
+                                            if (title) createTask(selectedBoard.id, list.id, title);
+                                        }} className="w-full mt-3 py-2 border-2 border-dashed rounded">+ Tarea</button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {showNewBoardModal && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded w-96">
+                                <h2 className="text-2xl font-bold mb-4">Nuevo Tablero</h2>
+                                <input id="boardName" placeholder="Nombre" className="w-full p-2 border rounded mb-4"/>
+                                <div className="flex gap-2">
+                                    <button onClick={() => { const name = document.getElementById('boardName').value; if(name) createBoard(name); }} className="flex-1 py-2 rounded" style={{backgroundColor:'#BAFF39'}}>Crear</button>
+                                    <button onClick={() => setShowNewBoardModal(false)} className="flex-1 py-2 bg-gray-300 rounded">Cancelar</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showTaskModal && selectedTask && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 overflow-y-auto">
+                            <div className="bg-white p-6 rounded w-2/3 max-h-screen overflow-y-auto m-8">
+                                <div className="flex justify-between mb-4">
+                                    <h2 className="text-2xl font-bold">{selectedTask.title}</h2>
+                                    <button onClick={() => setShowTaskModal(false)} className="text-2xl">×</button>
+                                </div>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="font-semibold">Descripción:</label>
+                                        <textarea value={selectedTask.desc || ''} onChange={e => setSelectedTask({...selectedTask, desc: e.target.value})} className="w-full p-2 border rounded" rows="3"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold">Fecha:</label>
+                                        <input type="date" value={selectedTask.date || ''} onChange={e => setSelectedTask({...selectedTask, date: e.target.value})} className="w-full p-2 border rounded"/>
+                                    </div>
+                                    <div>
+                                        <label className="font-semibold block mb-2">Subtareas:</label>
+                                        {(selectedTask.subtasks || []).map((st, i) => (
+                                            <div key={i} className="flex gap-2 mb-2">
+                                                <input type="checkbox" checked={st.done} onChange={e => {
+                                                    const subs = [...(selectedTask.subtasks || [])];
+                                                    subs[i].done = e.target.checked;
+                                                    setSelectedTask({...selectedTask, subtasks: subs});
+                                                }}/>
+                                                <input value={st.text} onChange={e => {
+                                                    const subs = [...(selectedTask.subtasks || [])];
+                                                    subs[i].text = e.target.value;
+                                                    setSelectedTask({...selectedTask, subtasks: subs});
+                                                }} className="flex-1 p-1 border rounded"/>
+                                                <button onClick={() => setSelectedTask({...selectedTask, subtasks: selectedTask.subtasks.filter((_,idx) => idx !== i)})} className="text-red-600">×</button>
+                                            </div>
+                                        ))}
+                                        <button onClick={() => setSelectedTask({...selectedTask, subtasks: [...(selectedTask.subtasks || []), {text:'', done:false}]})} className="px-3 py-1 rounded text-sm" style={{backgroundColor:'#BAFF39'}}>+ Subtarea</button>
+                                    </div>
+                                    <button onClick={() => {
+                                        updateTask(selectedBoard.id, selectedTask.listId, selectedTask.id, selectedTask);
+                                        setShowTaskModal(false);
+                                    }} className="w-full py-2 rounded font-semibold" style={{backgroundColor:'#BAFF39'}}>Guardar</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
